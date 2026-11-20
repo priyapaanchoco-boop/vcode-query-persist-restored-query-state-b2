@@ -10,6 +10,11 @@ import {
 import { notifyManager } from './notifyManager'
 import { CancelledError, canFetch, createRetryer } from './retryer'
 import { Removable } from './removable'
+import {
+  isPersisterRestoredResult,
+  mergeRestoredQueryState,
+} from './persisterRestoredResult'
+import type { PersisterRestoredResult } from './persisterRestoredResult'
 import type { QueryCache } from './queryCache'
 import type { QueryClient } from './queryClient'
 import type {
@@ -523,12 +528,31 @@ export class Query<
       this.#dispatch({ type: 'fetch', meta: context.fetchOptions?.meta })
     }
 
+    // A persister can resolve with a restored result instead of plain data.
+    // Unwrap it here, so the retryer (and anyone awaiting it) only sees data,
+    // and remember it so the restored state can be applied afterwards.
+    let restoredResult: PersisterRestoredResult<TData, TError> | undefined
+    const unwrapRestoredResult = (value: unknown) => {
+      if (isPersisterRestoredResult(value)) {
+        restoredResult = value
+        return value.data
+      }
+      return value
+    }
+
     // Try to fetch the data
     this.#retryer = createRetryer({
-      initialPromise: fetchOptions?.initialPromise as
-        | Promise<TData>
-        | undefined,
-      fn: context.fetchFn as () => Promise<TData>,
+      initialPromise: fetchOptions?.initialPromise?.then(
+        unwrapRestoredResult,
+      ) as Promise<TData> | undefined,
+      fn: () => {
+        const result = context.fetchFn()
+        return (
+          isThenable(result)
+            ? result.then(unwrapRestoredResult)
+            : unwrapRestoredResult(result)
+        ) as TData | Promise<TData>
+      },
       onCancel: (error) => {
         if (error instanceof CancelledError && error.revert) {
           this.setState({
@@ -555,6 +579,22 @@ export class Query<
 
     try {
       const data = await this.#retryer.start()
+
+      if (restoredResult) {
+        // Restored from a persister: take the persisted state as it is,
+        // keeping whatever is newer in memory, and skip success callbacks.
+        // #revertState holds the state from before this fetch started.
+        this.setState({
+          ...mergeRestoredQueryState(
+            this.#revertState ?? this.state,
+            restoredResult,
+          ),
+          fetchStatus: 'idle',
+        })
+        this.#revertState = undefined
+        return this.state.data as TData
+      }
+
       // this is more of a runtime guard
       // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition
       if (data === undefined) {
@@ -696,6 +736,14 @@ export class Query<
       this.#cache.notify({ query: this, type: 'updated', action })
     })
   }
+}
+
+function isThenable(value: unknown): value is PromiseLike<unknown> {
+  return (
+    typeof value === 'object' &&
+    value !== null &&
+    typeof (value as PromiseLike<unknown>).then === 'function'
+  )
 }
 
 export function fetchState<

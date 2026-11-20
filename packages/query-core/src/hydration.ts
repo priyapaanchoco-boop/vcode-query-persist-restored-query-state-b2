@@ -1,5 +1,6 @@
 import { tryResolveSync } from './thenable'
 import { noop } from './utils'
+import { mergeRestoredQueryState } from './persisterRestoredResult'
 import type {
   DefaultError,
   MutationKey,
@@ -226,10 +227,7 @@ export function hydrate(
           // payloads that might not have dehydratedAt
           dehydratedAt !== undefined &&
           dehydratedAt > query.state.dataUpdatedAt
-        if (
-          state.dataUpdatedAt > query.state.dataUpdatedAt ||
-          hasNewerSyncData
-        ) {
+        if (hasNewerSyncData) {
           // omit fetchStatus from dehydrated state
           // so that query stays in its current fetchStatus
           const { fetchStatus: _ignored, ...serializedState } = state
@@ -237,6 +235,14 @@ export function hydrate(
             ...serializedState,
             data,
           })
+        } else {
+          // Keep whichever is newer, comparing data and error separately
+          const merged = mergeRestoredQueryState(query.state, { data, state })
+          if (merged !== query.state) {
+            // omit fetchStatus so that query stays in its current fetchStatus
+            const { fetchStatus: _ignored, ...mergedState } = merged
+            query.setState(mergedState)
+          }
         }
       } else {
         // Restore query
@@ -255,7 +261,12 @@ export function hydrate(
             ...state,
             data,
             fetchStatus: 'idle',
-            status: data !== undefined ? 'success' : state.status,
+            // Only a pending query whose promise already resolved becomes
+            // success; any other saved status is restored as it was
+            status:
+              data !== undefined && state.status === 'pending'
+                ? 'success'
+                : state.status,
           },
         )
       }

@@ -8,6 +8,7 @@ import type { RetryDelayValue, RetryValue } from './retryer'
 import type { QueryFilters, QueryTypeFilter, SkipToken } from './utils'
 import type { QueryCache } from './queryCache'
 import type { MutationCache } from './mutationCache'
+import type { PersisterRestoredResult } from './persisterRestoredResult'
 
 export type NonUndefinedGuard<T> = T extends undefined ? never : T
 
@@ -128,12 +129,17 @@ export type QueryPersister<
       queryFn: QueryFunction<T, TQueryKey, never>,
       context: QueryFunctionContext<TQueryKey>,
       query: Query,
-    ) => T | Promise<T>
+    ) => QueryPersisterResult<T>
   : (
       queryFn: QueryFunction<T, TQueryKey, TPageParam>,
       context: QueryFunctionContext<TQueryKey>,
       query: Query,
-    ) => T | Promise<T>
+    ) => QueryPersisterResult<T>
+
+type QueryPersisterResult<T> =
+  | T
+  | PersisterRestoredResult<T, any>
+  | Promise<T | PersisterRestoredResult<T, any>>
 
 export type QueryFunctionContext<
   TQueryKey extends QueryKey = QueryKey,

@@ -1,6 +1,8 @@
 import {
+  createPersisterRestoredResult,
   hashKey,
   matchQuery,
+  noop,
   notifyManager,
   partialMatchKey,
 } from '@tanstack/query-core'
@@ -126,6 +128,17 @@ export function experimental_createQueryPersister<TStorageValue = string>({
     queryHash: string,
     afterRestoreMacroTask?: (persistedQuery: PersistedQuery) => void,
   ) {
+    const persistedQuery = await retrievePersistedQuery(
+      queryHash,
+      afterRestoreMacroTask,
+    )
+    return persistedQuery?.state.data as T | undefined
+  }
+
+  async function retrievePersistedQuery(
+    queryHash: string,
+    afterRestoreMacroTask?: (persistedQuery: PersistedQuery) => void,
+  ): Promise<PersistedQuery | undefined> {
     if (storage != null) {
       const storageKey = `${prefix}-${queryHash}`
       try {
@@ -149,7 +162,7 @@ export function experimental_createQueryPersister<TStorageValue = string>({
               )
             }
             // We must resolve the promise here, as otherwise we will have `loading` state in the app until `queryFn` resolves
-            return persistedQuery.state.data as T
+            return persistedQuery
           }
         }
       } catch (err) {
@@ -209,14 +222,22 @@ export function experimental_createQueryPersister<TStorageValue = string>({
 
     // Try to restore only if we do not have any data in the cache and we have persister defined
     if (matchesFilter && query.state.data === undefined && storage != null) {
-      const restoredData = await retrieveQuery(
+      const persistedQuery = await retrievePersistedQuery(
         query.queryHash,
-        (persistedQuery: PersistedQuery) => {
-          // Set proper updatedAt, since resolving in the first pass overrides those values
-          query.setState({
-            dataUpdatedAt: persistedQuery.state.dataUpdatedAt,
-            errorUpdatedAt: persistedQuery.state.errorUpdatedAt,
-          })
+        (restoredQuery: PersistedQuery) => {
+          // Make sure the updatedAt timestamps are the persisted ones, unless
+          // the query already holds something newer
+          const { dataUpdatedAt, errorUpdatedAt } = restoredQuery.state
+          const updatedAt: Partial<QueryState> = {}
+          if (dataUpdatedAt > query.state.dataUpdatedAt) {
+            updatedAt.dataUpdatedAt = dataUpdatedAt
+          }
+          if (errorUpdatedAt > query.state.errorUpdatedAt) {
+            updatedAt.errorUpdatedAt = errorUpdatedAt
+          }
+          if (Object.keys(updatedAt).length) {
+            query.setState(updatedAt)
+          }
 
           if (
             refetchOnRestore === 'always' ||
@@ -227,8 +248,13 @@ export function experimental_createQueryPersister<TStorageValue = string>({
         },
       )
 
-      if (restoredData !== undefined) {
-        return Promise.resolve(restoredData as T)
+      if (persistedQuery && persistedQuery.state.data !== undefined) {
+        // Hand the whole persisted state to the query, so it is restored
+        // as it was saved instead of being treated as a fresh success
+        return createPersisterRestoredResult({
+          data: persistedQuery.state.data as T,
+          state: persistedQuery.state as QueryState<T>,
+        })
       }
     }
 
@@ -303,13 +329,26 @@ export function experimental_createQueryPersister<TStorageValue = string>({
             }
           }
 
-          queryClient.setQueryData(
-            persistedQuery.queryKey,
-            persistedQuery.state.data,
-            {
-              updatedAt: persistedQuery.state.dataUpdatedAt,
-            },
-          )
+          const query = queryClient
+            .getQueryCache()
+            .build(queryClient, { queryKey: persistedQuery.queryKey })
+
+          // A fetch in flight will produce newer data than storage, skip it
+          if (query.state.fetchStatus !== 'idle') {
+            continue
+          }
+
+          // Restore the full persisted state through the query itself
+          await query
+            .fetch(undefined, {
+              initialPromise: Promise.resolve(
+                createPersisterRestoredResult({
+                  data: persistedQuery.state.data,
+                  state: persistedQuery.state,
+                }),
+              ) as Promise<unknown>,
+            })
+            .catch(noop)
         }
       }
     } else if (process.env.NODE_ENV === 'development') {
